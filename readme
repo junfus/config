@@ -1,0 +1,31 @@
+# config
+/home/xxx/.config/
+/home/xxx/.i3/
+/home/xxx/.unh/
+/home/xxx/.urxvt/
+/home/xxx/.pam_environment
+/home/xxx/.profile
+/home/xxx/.Xresources
+
+/etc/X11/xorg.conf.d/20-intel.conf
+/etc/X11/xorg.conf.d/30-touchpad.conf
+
+/usr/bin/start_conky_custom
+
+# no beep
+su
+rmmod pcspkr
+echo "blacklist pcspkr" > /etc/modprobe.d/nobeep.conf
+
+# netease cloud music
+/usr/share/applications/netease-cloud-music.desktop
+Exec=bash -c "unset SESSION_MANAGER && env XDG_CURRENT_DESKTOP=Unity netease-cloud-music --force-device-scale-factor=2 %U"
+find ~/.config/netease-cloud-music -exec sudo chown $USER:$USER {} +
+find ~/.config/netease-cloud-music -exec sudo chmod 755 {} + 
+find ~/.cache/netease-cloud-music  -exec sudo chown $USER:$USER {} +
+find ~/.cache/netease-cloud-music  -exec sudo chmod 755 {} +
+
+# pulseaudio
+systemctl --user stop pulseaudio
+systemctl --user disable pulseaudio
+systemctl --user enable pulseaudio

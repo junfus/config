@@ -1,0 +1,6 @@
+#!/bin/bash
+
+conky -c /home/junfu/.config/conky/conky_shortcuts &&
+conky -c /home/junfu/.config/conky/conky_custom &&
+
+exit 0
