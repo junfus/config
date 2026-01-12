@@ -21,36 +21,6 @@
 --   7) validate quotes chapter-by-chapter and write log
 --
 
--- === Paragraph punctuation character definitions ===
--- ASCII punctuation
-local PUNCT_ASCII_EXCLAIM = 0x21              -- !
-local PUNCT_ASCII_PAREN_OPEN = 0x28           -- (
-local PUNCT_ASCII_PAREN_CLOSE = 0x29          -- )
-local PUNCT_ASCII_COMMA = 0x2C                -- ,
-local PUNCT_ASCII_PERIOD = 0x2E               -- .
-local PUNCT_ASCII_COLON = 0x3A                -- :
-local PUNCT_ASCII_SEMICOLON = 0x3B            -- ;
-local PUNCT_ASCII_QUESTION = 0x3F             -- ?
-local PUNCT_ASCII_TILDE = 0x7E                -- ~
--- Unicode punctuation and quotes
-local PUNCT_EM_DASH = 0x2014                  -- —
-local PUNCT_ELLIPSIS = 0x2026                 -- …
-local PUNCT_END_PERIOD = 0x3002               -- 。
-local PUNCT_BRACKET_CLOSE_CN = 0x3011         -- 】
-local PUNCT_DOUBLE_ANGLE_QUOTE_CLOSE = 0x300B -- 》
-local PUNCT_QUOTE_OPEN = 0x300C               -- 「
-local PUNCT_QUOTE_CLOSE = 0x300D              -- 」
-local PUNCT_QUOTE_OPEN_NESTED = 0x300E        -- 『
-local PUNCT_QUOTE_CLOSE_NESTED = 0x300F       -- 』
-local PUNCT_PAREN_OPEN_CN = 0xFF08            -- （
-local PUNCT_PAREN_CLOSE_CN = 0xFF09           -- ）
-local PUNCT_END_EXCLAIM = 0xFF01              -- ！
-local PUNCT_COMMA_CN = 0xFF0C                 -- ，
-local PUNCT_COLON_CN = 0xFF1A                 -- ：
-local PUNCT_SEMICOLON_CN = 0xFF1B             -- ；
-local PUNCT_END_QUESTION = 0xFF1F             -- ？
-local PUNCT_TILDE_CN = 0xFF5E                 -- ～
-
 -- === IO / basic utilities ===
 
 local function die(message)
@@ -115,7 +85,8 @@ local function trim_ends(line)
 end
 
 local function consume_indent_prefix(line, start_pos)
-    -- Consume leading indentation (spaces, tabs, full-width spaces) from s starting at start_pos.
+    -- Consume leading indentation (spaces, tabs, full-width spaces) from position start_pos.
+    -- Returns position after last indentation character.
     local i = start_pos
     while i <= #line do
         local b = line:byte(i)
@@ -133,6 +104,15 @@ end
 
 -- === Text normalization helpers ===
 
+local function split_lines(text)
+    -- Split text into lines, appending newline ensures last line is captured
+    local lines = {}
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line
+    end
+    return lines
+end
+
 local function is_ascii_word_cp(cp)
     return (cp >= 0x30 and cp <= 0x39) -- 0-9
         or (cp >= 0x41 and cp <= 0x5A) -- A-Z
@@ -140,50 +120,53 @@ local function is_ascii_word_cp(cp)
         or (cp == 0x5F)                -- _
 end
 
+-- === Whitespace normalization helpers ===
+
+local function is_whitespace_cp(cp)
+    return cp == 0x20 or cp == 0x09 or cp == 0x3000
+end
+
 local function normalize_whitespace_preserve_english(line)
-    -- Keep whitespace *only* when it is between ASCII word characters (English words).
-    -- Remove whitespace around Chinese chars/punctuation/symbols.
-    -- Whitespace considered: space, tab, full-width space.
-    local chars = {}
+    -- Preserve a single ASCII space only when it separates ASCII word characters.
+    -- Remove other whitespace (including full-width spaces) between CJK and punctuation.
+    local codepoints = {}
     for _, cp in utf8.codes(line) do
-        chars[#chars + 1] = cp
-    end
-
-    local function is_ws(cp)
-        return cp == 0x20 or cp == 0x09 or cp == 0x3000
-    end
-
-    local function prev_non_ws(i)
-        for j = i - 1, 1, -1 do
-            if not is_ws(chars[j]) then
-                return chars[j]
-            end
-        end
-
-        return nil
-    end
-
-    local function next_non_ws(i)
-        for j = i + 1, #chars do
-            if not is_ws(chars[j]) then
-                return chars[j]
-            end
-        end
-
-        return nil
+        codepoints[#codepoints + 1] = cp
     end
 
     local out = {}
-    for i, cp in ipairs(chars) do
-        if is_ws(cp) then
-            local left = prev_non_ws(i)
-            local right = next_non_ws(i)
-            if left ~= nil and right ~= nil and is_ascii_word_cp(left) and is_ascii_word_cp(right) then
-                -- Collapse any run of whitespace between English word chars to a single ASCII space.
-                if out[#out] ~= " " then
-                    out[#out + 1] = " "
-                end
+    local i = 1
+    while i <= #codepoints do
+        local cp = codepoints[i]
+        if is_whitespace_cp(cp) then
+            -- find nearest non-space to the left
+            local l = i - 1
+            while l >= 1 and is_whitespace_cp(codepoints[l]) do l = l - 1 end
+            local r = i + 1
+            while r <= #codepoints and is_whitespace_cp(codepoints[r]) do r = r + 1 end
+
+            if l >= 1 and r <= #codepoints and is_ascii_word_cp(codepoints[l]) and is_ascii_word_cp(codepoints[r]) then
+                if out[#out] ~= " " then out[#out + 1] = " " end
             end
+
+            i = r
+        else
+            out[#out + 1] = utf8.char(cp)
+            i = i + 1
+        end
+    end
+
+    return table.concat(out)
+end
+
+local function normalize_fullwidth_to_ascii(line)
+    -- Convert full-width ASCII characters to ASCII (A-Za-z0-9).
+    local out = {}
+    for _, cp in utf8.codes(line) do
+        if cp >= 0xFF10 and cp <= 0xFF19
+            or cp >= 0xFF21 and cp <= 0xFF3A
+            or cp >= 0xFF41 and cp <= 0xFF5A then
+            out[#out + 1] = utf8.char(cp - 0xFF01 + 0x21)
         else
             out[#out + 1] = utf8.char(cp)
         end
@@ -193,62 +176,66 @@ local function normalize_whitespace_preserve_english(line)
 end
 
 local function ends_with_ascii_word(text)
+    -- Check if text ends with ASCII word character (letter, digit, or underscore).
     return text:match("[A-Za-z0-9_]$") ~= nil
 end
 
 local function starts_with_ascii_word(text)
+    -- Check if text starts with ASCII word character (letter, digit, or underscore).
     return text:match("^[A-Za-z0-9_]") ~= nil
 end
 
 local PUNCT_PAIRS = {
-    [PUNCT_ASCII_COMMA] = { ascii = PUNCT_ASCII_COMMA, full = PUNCT_COMMA_CN },
-    [PUNCT_ASCII_PERIOD] = { ascii = PUNCT_ASCII_PERIOD, full = PUNCT_END_PERIOD },
-    [PUNCT_ASCII_PAREN_OPEN] = { ascii = PUNCT_ASCII_PAREN_OPEN, full = PUNCT_PAREN_OPEN_CN },
-    [PUNCT_ASCII_PAREN_CLOSE] = { ascii = PUNCT_ASCII_PAREN_CLOSE, full = PUNCT_PAREN_CLOSE_CN },
-    [PUNCT_ASCII_EXCLAIM] = { ascii = PUNCT_ASCII_EXCLAIM, full = PUNCT_END_EXCLAIM },
-    [PUNCT_ASCII_QUESTION] = { ascii = PUNCT_ASCII_QUESTION, full = PUNCT_END_QUESTION },
-    [PUNCT_ASCII_COLON] = { ascii = PUNCT_ASCII_COLON, full = PUNCT_COLON_CN },
-    [PUNCT_ASCII_SEMICOLON] = { ascii = PUNCT_ASCII_SEMICOLON, full = PUNCT_SEMICOLON_CN },
-    [PUNCT_ASCII_TILDE] = { ascii = PUNCT_ASCII_TILDE, full = PUNCT_TILDE_CN },
-    [PUNCT_COMMA_CN] = { ascii = PUNCT_ASCII_COMMA, full = PUNCT_COMMA_CN },
-    [PUNCT_END_PERIOD] = { ascii = PUNCT_ASCII_PERIOD, full = PUNCT_END_PERIOD },
-    [PUNCT_PAREN_OPEN_CN] = { ascii = PUNCT_ASCII_PAREN_OPEN, full = PUNCT_PAREN_OPEN_CN },
-    [PUNCT_PAREN_CLOSE_CN] = { ascii = PUNCT_ASCII_PAREN_CLOSE, full = PUNCT_PAREN_CLOSE_CN },
-    [PUNCT_END_EXCLAIM] = { ascii = PUNCT_ASCII_EXCLAIM, full = PUNCT_END_EXCLAIM },
-    [PUNCT_END_QUESTION] = { ascii = PUNCT_ASCII_QUESTION, full = PUNCT_END_QUESTION },
-    [PUNCT_COLON_CN] = { ascii = PUNCT_ASCII_COLON, full = PUNCT_COLON_CN },
-    [PUNCT_SEMICOLON_CN] = { ascii = PUNCT_ASCII_SEMICOLON, full = PUNCT_SEMICOLON_CN },
-    [PUNCT_TILDE_CN] = { ascii = PUNCT_ASCII_TILDE, full = PUNCT_TILDE_CN },
+    -- Maps punctuation codepoints to {ascii, full-width} form pair.
+    -- Used to normalize punctuation based on context (English word vs Chinese text).
+    [0x21] = { ascii = 0x21, full = 0xFF01 },   -- ! / ！
+    [0xFF01] = { ascii = 0x21, full = 0xFF01 }, -- ！ / !
+    [0x28] = { ascii = 0x28, full = 0xFF08 },   -- ( / （
+    [0xFF08] = { ascii = 0x28, full = 0xFF08 }, -- （ / (
+    [0x29] = { ascii = 0x29, full = 0xFF09 },   -- ) / ）
+    [0xFF09] = { ascii = 0x29, full = 0xFF09 }, -- ） / )
+    [0x2C] = { ascii = 0x2C, full = 0xFF0C },   -- , / ，
+    [0xFF0C] = { ascii = 0x2C, full = 0xFF0C }, -- ， / ,
+    [0x2E] = { ascii = 0x2E, full = 0x3002 },   -- . / 。
+    [0x3002] = { ascii = 0x2E, full = 0x3002 }, -- 。 / .
+    [0x3F] = { ascii = 0x3F, full = 0xFF1F },   -- ? / ？
+    [0xFF1F] = { ascii = 0x3F, full = 0xFF1F }, -- ？ / ?
+    [0x3A] = { ascii = 0x3A, full = 0xFF1A },   -- : / ：
+    [0xFF1A] = { ascii = 0x3A, full = 0xFF1A }, -- ： / :
+    [0x3B] = { ascii = 0x3B, full = 0xFF1B },   -- ; / ；
+    [0xFF1B] = { ascii = 0x3B, full = 0xFF1B }, -- ； / ;
+    [0x5B] = { ascii = 0x5B, full = 0xFF3B },   -- [ / ［
+    [0xFF3B] = { ascii = 0x5B, full = 0xFF3B }, -- ［ / [
+    [0x5D] = { ascii = 0x5D, full = 0xFF3D },   -- ] / ］
+    [0xFF3D] = { ascii = 0x5D, full = 0xFF3D }, -- ］ / ]
+    [0x7B] = { ascii = 0x7B, full = 0xFF5B },   -- { / ｛
+    [0xFF5B] = { ascii = 0x7B, full = 0xFF5B }, -- ｛ / {
+    [0x7D] = { ascii = 0x7D, full = 0xFF5D },   -- } / ｝
+    [0xFF5D] = { ascii = 0x7D, full = 0xFF5D }, -- ｝ / }
+    [0x7E] = { ascii = 0x7E, full = 0xFF5E },   -- ~ / ～
+    [0xFF5E] = { ascii = 0x7E, full = 0xFF5E }, -- ～ / ~
 }
 
 local function normalize_punctuation(line)
     -- Normalize punctuation for mixed Chinese/English text.
-    -- Rule: for , ! ? : ; choose ASCII if the punctuation follows an ASCII “word”
-    -- character (A-Z, a-z, 0-9, _), otherwise choose the Chinese full-width form.
-    -- This works both ways, meaning it can also fix wrongly-used Chinese punctuation
-    -- inside English/number contexts.
-
+    -- Choose ASCII punctuation when it follows an ASCII word; otherwise use full-width.
     local out = {}
-    local prev_non_ws_is_word = false
+    local last_ascii = false
     for _, cp in utf8.codes(line) do
         if cp == 0x20 or cp == 0x09 then
             out[#out + 1] = utf8.char(cp)
+            -- preserve last_ascii
         else
-            local p = PUNCT_PAIRS[cp]
-            if p ~= nil then
-                if prev_non_ws_is_word then
-                    out[#out + 1] = utf8.char(p.ascii)
-                else
-                    out[#out + 1] = utf8.char(p.full)
-                end
-                prev_non_ws_is_word = false
+            local pair = PUNCT_PAIRS[cp]
+            if pair then
+                out[#out + 1] = utf8.char(last_ascii and pair.ascii or pair.full)
+                last_ascii = false
             else
                 out[#out + 1] = utf8.char(cp)
-                prev_non_ws_is_word = is_ascii_word_cp(cp)
+                last_ascii = is_ascii_word_cp(cp)
             end
         end
     end
-
     return table.concat(out)
 end
 
@@ -262,10 +249,12 @@ local PARA_INDENT = "　　"
 -- inside a bracket class like [零一二...] matches *bytes*, not characters.
 -- That can lead to false matches and confusing behavior.
 --
--- Instead, detect titles using UTF-8 codepoints:
---    第 + (零一二三四五六七八九十百 or 0-9)+ + 章
+-- Supported patterns:
+--   第 + (零一二三四五六七八九十百 or 0-9)+ + 章
+--   番外 (Extra/Special chapter, optionally followed by title)
 
 local function is_chapter_title_number_cp(cp)
+    -- Check if codepoint is a valid chapter number digit (0-9 or Chinese numerals).
     return (cp >= 0x30 and cp <= 0x39) -- 0-9
         or cp == 0x96F6                -- 零
         or cp == 0x4E00                -- 一
@@ -279,102 +268,161 @@ local function is_chapter_title_number_cp(cp)
         or cp == 0x4E5D                -- 九
         or cp == 0x5341                -- 十
         or cp == 0x767E                -- 百
+        or cp == 0x5343                -- 千
+        or cp == 0x4E07                -- 万
 end
 
-local function split_chapter_title_prefix(line)
-    -- Returns (prefix, rest) when prefix is like "第...章" and rest is remaining text.
-    -- Returns (nil, nil) if not a chapter title.
-    --
-    -- prefix/rest are byte slices based on utf8.codes() byte offsets, so they are safe.
-    local cps = {}
-    local poses = {}
-    for pos, cp in utf8.codes(line) do
-        cps[#cps + 1] = cp
-        poses[#poses + 1] = pos
-    end
+-- === Chapter title parsing helpers ===
 
-    if #cps < 3 then
+local function collect_codepoints_and_positions(text)
+    -- Helper: Extract both codepoints and their byte positions for safe UTF-8 slicing.
+    local codepoints = {}
+    local byte_positions = {}
+    for byte_pos, codepoint in utf8.codes(text) do
+        codepoints[#codepoints + 1] = codepoint
+        byte_positions[#byte_positions + 1] = byte_pos
+    end
+    return codepoints, byte_positions
+end
+
+local function try_pattern_prologue_chapter(codepoints, byte_positions, text)
+    -- Try to match "楔子" (extra/special chapter) pattern.
+    if codepoints[1] == 0x6954 and #codepoints >= 2 and codepoints[2] == 0x5B50 then
+        local rest_start = (3 <= #byte_positions) and byte_positions[3] or (#text + 1)
+        local prefix = text:sub(1, rest_start - 1)
+        local rest = text:sub(rest_start)
+        return prefix, rest
+    end
+    return nil, nil
+end
+
+local function try_pattern_extra_chapter(codepoints, byte_positions, text)
+    -- Try to match "番外" (extra/special chapter) pattern.
+    if codepoints[1] == 0x756A and #codepoints >= 2 and codepoints[2] == 0x5916 then
+        local rest_start = (3 <= #byte_positions) and byte_positions[3] or (#text + 1)
+        local prefix = text:sub(1, rest_start - 1)
+        local rest = text:sub(rest_start)
+        return prefix, rest
+    end
+    return nil, nil
+end
+
+local function try_pattern_numbered_chapter(codepoints, byte_positions, text)
+    -- Try to match "第...章" (numbered chapter) pattern where ... is chapter number.
+    if #codepoints < 3 or codepoints[1] ~= 0x7B2C then -- 第
         return nil, nil
     end
 
-    if cps[1] ~= 0x7B2C then -- 第
-        return nil, nil
-    end
-
+    -- Scan for chapter number digits
     local i = 2
-    while i <= #cps and is_chapter_title_number_cp(cps[i]) do
+    while i <= #codepoints and is_chapter_title_number_cp(codepoints[i]) do
         i = i + 1
     end
 
-    if i == 2 then
+    -- Must have at least one digit and then 章
+    if i == 2 or i > #codepoints or codepoints[i] ~= 0x7AE0 then -- 章
         return nil, nil
     end
 
-    if i > #cps or cps[i] ~= 0x7AE0 then -- 章
-        return nil, nil
-    end
-
-    local rest_start = (i < #poses) and poses[i + 1] or (#line + 1)
-    local prefix = line:sub(1, rest_start - 1)
-    local rest = line:sub(rest_start)
-
+    local rest_start = (i < #byte_positions) and byte_positions[i + 1] or (#text + 1)
+    local prefix = text:sub(1, rest_start - 1)
+    local rest = text:sub(rest_start)
     return prefix, rest
 end
 
+local function split_chapter_title_prefix(line)
+    -- Returns (prefix, rest) when prefix is like "第...章" or "番外" and rest is remaining text.
+    -- Returns (nil, nil) if not a chapter title.
+    --
+    -- prefix/rest are byte slices based on utf8.codes() byte offsets, so they are safe.
+
+    local codepoints, byte_positions = collect_codepoints_and_positions(line)
+
+    if #codepoints == 0 then
+        return nil, nil
+    end
+
+    -- Try patterns in order: 楔子, 番外, then 第...章
+    local prefix, rest = try_pattern_prologue_chapter(codepoints, byte_positions, line)
+    if prefix ~= nil then
+        return prefix, rest
+    end
+
+    local prefix, rest = try_pattern_extra_chapter(codepoints, byte_positions, line)
+    if prefix ~= nil then
+        return prefix, rest
+    end
+
+    return try_pattern_numbered_chapter(codepoints, byte_positions, line)
+end
+
 local function is_chapter_title(line)
+    -- Detect if line is a chapter title (matches 楔子, 番外, or 第...章 pattern).
     local prefix, _ = split_chapter_title_prefix(line)
 
     return prefix ~= nil
 end
 
+local function is_separator(line)
+    -- Check if line is a separator (exactly 6 dashes: "------").
+    -- Allow only dash character (0x2D) repeated exactly 6 times, with optional surrounding whitespace.
+    local trimmed = trim_ends(line)
+    if #trimmed ~= 6 then
+        return false
+    end
+    for _, cp in utf8.codes(trimmed) do
+        if cp ~= 0x2D then -- 0x2D is dash '-'
+            return false
+        end
+    end
+    return true
+end
+
+-- === Chapter title spacing helpers ===
+
+local function trim_title_suffix(text)
+    -- Remove leading ASCII/UTF-8 whitespace and a single leading colon (ASCII or full-width).
+    -- Repeats until no more change (handles multiple separator characters in sequence).
+    while true do
+        local before = text
+
+        -- Trim ASCII whitespace
+        text = text:gsub("^%s+", "")
+
+        -- Trim leading full-width spaces (consume_indent_prefix handles them)
+        local indent_end_pos = consume_indent_prefix(text, 1)
+        if indent_end_pos > 1 then
+            text = text:sub(indent_end_pos)
+        end
+
+        -- Remove a single leading ASCII colon ':' or a full-width colon '：'
+        if text:sub(1, 1) == ":" then
+            text = text:sub(2)
+        elseif text:sub(1, 3) == "：" then
+            text = text:sub(4)
+        end
+
+        if text == before then
+            return text
+        end
+    end
+end
+
 local function normalize_chapter_title_spacing(line)
-    -- Ensure a single ASCII space between "章" and the actual title text.
-    -- Example:
-    --   "第三章  标题" -> "第三章 标题"
-    --   "第三章标题"  -> "第三章 标题"
+    -- Ensure proper spacing for chapter titles:
+    --   "第三章  标题" -> "第三章 标题" (single space after 章)
+    --   "第三章标题"  -> "第三章 标题" (add space if missing)
     --   "第三章" -> "第三章" (no trailing space)
+    --   "番外  标题" -> "番外 标题" (single space after 番外)
+    --   "番外标题" -> "番外 标题" (add space if missing)
+    --   "番外" -> "番外" (no trailing space)
+
     local prefix, rest = split_chapter_title_prefix(line)
     if not prefix then
         return line
     end
 
-    -- Normalize whatever follows "第...章":
-    -- - trim leading ASCII whitespace + full-width spaces
-    -- - remove an optional ':' / '：' separator
-    -- - trim again
-    --
-    -- IMPORTANT: avoid Lua pattern classes like "[%s　]" (byte based; can corrupt UTF-8).
-    local function trim_leading_spaces_and_optional_colon(rest_text)
-        while true do
-            local changed = false
-
-            local s2 = rest_text:gsub("^%s+", "")
-            if s2 ~= rest_text then
-                rest_text = s2
-                changed = true
-            end
-
-            local indent_end = consume_indent_prefix(rest_text, 1)
-            if indent_end > 1 then
-                rest_text = rest_text:sub(indent_end)
-                changed = true
-            end
-
-            if rest_text:sub(1, 1) == ":" then
-                rest_text = rest_text:sub(2)
-                changed = true
-            elseif rest_text:sub(1, 3) == "：" then
-                rest_text = rest_text:sub(4)
-                changed = true
-            end
-
-            if not changed then
-                return rest_text
-            end
-        end
-    end
-
-    rest = trim_leading_spaces_and_optional_colon(rest)
+    rest = trim_title_suffix(rest)
 
     if rest == "" then
         return prefix
@@ -390,116 +438,158 @@ local function starts_with_indent(raw_line)
     return next_pos > 1 and next_pos <= #raw_line
 end
 
+-- === Paragraph joining helpers ===
+
+local function normalize_line_text(text)
+    -- Apply all text normalizations to a line before adding to current paragraph.
+    -- Whitespace preservation must happen before punctuation normalization.
+    local normalized = normalize_whitespace_preserve_english(text)
+    normalized = normalize_fullwidth_to_ascii(normalized)
+    return normalize_punctuation(normalized)
+end
+
+local function should_add_space_before_text(current_ends_with_ascii_word, new_text)
+    -- Determine if space is needed before new text.
+    -- Space is needed when joining two ASCII word chunks to prevent gluing.
+    return current_ends_with_ascii_word and starts_with_ascii_word(new_text)
+end
+
+local function format_paragraph_for_output(text)
+    -- Format paragraph: add indentation unless it's a chapter title.
+    if is_chapter_title(text) then
+        return text
+    end
+    return PARA_INDENT .. text
+end
+
 local function join_paragraphs(input)
     input = strip_utf8_bom(input)
     input = normalize_newlines(input)
 
+    -- State tracking during paragraph assembly
     local paragraphs = {}
-    local current_parts = {}
-    local have_current = false
-    local current_tail_ascii_word = false
+    local current_paragraph_parts = {}
+    local has_current_paragraph = false
+    local current_ends_with_ascii_word = false
 
-    local function append_to_current(cleaned)
-        if not have_current then
-            current_parts = { cleaned }
-            have_current = true
-            current_tail_ascii_word = ends_with_ascii_word(cleaned)
-
-            return
-        end
-
-        -- Avoid gluing wrapped English words together.
-        if current_tail_ascii_word and starts_with_ascii_word(cleaned) then
-            current_parts[#current_parts + 1] = " "
-        end
-        current_parts[#current_parts + 1] = cleaned
-        current_tail_ascii_word = ends_with_ascii_word(cleaned)
-    end
-
-    local function flush()
-        if have_current and #current_parts > 0 then
-            local paragraph = table.concat(current_parts)
-            if is_chapter_title(paragraph) then
-                paragraphs[#paragraphs + 1] = paragraph
-            else
-                paragraphs[#paragraphs + 1] = PARA_INDENT .. paragraph
+    -- Process each line from input
+    local lines = split_lines(input)
+    for _, raw_line in ipairs(lines) do
+        -- Handle separator lines (exactly 6 dashes)
+        if is_separator(raw_line) then
+            if has_current_paragraph and #current_paragraph_parts > 0 then
+                local paragraph = table.concat(current_paragraph_parts)
+                local formatted = format_paragraph_for_output(paragraph)
+                paragraphs[#paragraphs + 1] = formatted
             end
-        end
-        current_parts = {}
-        have_current = false
-        current_tail_ascii_word = false
-    end
-
-    -- Iterate lines safely (including blank lines). Appending "\n" ensures the last line is included.
-    for raw_line in (input .. "\n"):gmatch("([^\n]*)\n") do
-        local trimmed = trim_ends(raw_line)
-        if trimmed == "" then
-            flush()
+            current_paragraph_parts = {}
+            has_current_paragraph = false
+            current_ends_with_ascii_word = false
+            paragraphs[#paragraphs + 1] = PARA_INDENT .. trim_ends(raw_line)
         else
-            if have_current and starts_with_indent(raw_line) then
-                flush()
-            end
+            local trimmed = trim_ends(raw_line)
+            -- Blank/empty lines trigger paragraph boundaries
+            if trimmed == "" then
+                if has_current_paragraph and #current_paragraph_parts > 0 then
+                    local paragraph = table.concat(current_paragraph_parts)
+                    local formatted = format_paragraph_for_output(paragraph)
+                    paragraphs[#paragraphs + 1] = formatted
+                end
+                current_paragraph_parts = {}
+                has_current_paragraph = false
+                current_ends_with_ascii_word = false
+            else
+                -- Indented lines also trigger paragraph boundaries
+                if has_current_paragraph and starts_with_indent(raw_line) then
+                    if #current_paragraph_parts > 0 then
+                        local paragraph = table.concat(current_paragraph_parts)
+                        local formatted = format_paragraph_for_output(paragraph)
+                        paragraphs[#paragraphs + 1] = formatted
+                    end
+                    current_paragraph_parts = {}
+                    has_current_paragraph = false
+                    current_ends_with_ascii_word = false
+                end
 
-            local cleaned = normalize_punctuation(normalize_whitespace_preserve_english(trimmed))
-
-            if cleaned ~= "" then
-                append_to_current(cleaned)
+                -- Normalize and add line text
+                local cleaned = normalize_line_text(trimmed)
+                if cleaned ~= "" then
+                    if not has_current_paragraph then
+                        -- Starting first chunk of paragraph
+                        current_paragraph_parts = { cleaned }
+                        has_current_paragraph = true
+                        current_ends_with_ascii_word = ends_with_ascii_word(cleaned)
+                    else
+                        -- Avoid gluing wrapped English words together
+                        if should_add_space_before_text(current_ends_with_ascii_word, cleaned) then
+                            current_paragraph_parts[#current_paragraph_parts + 1] = " "
+                        end
+                        current_paragraph_parts[#current_paragraph_parts + 1] = cleaned
+                        current_ends_with_ascii_word = ends_with_ascii_word(cleaned)
+                    end
+                end
             end
         end
     end
 
-    flush()
+    -- Don't forget final paragraph
+    if has_current_paragraph and #current_paragraph_parts > 0 then
+        local paragraph = table.concat(current_paragraph_parts)
+        local formatted = format_paragraph_for_output(paragraph)
+        paragraphs[#paragraphs + 1] = formatted
+    end
 
     return table.concat(paragraphs, "\n")
 end
 
-local function ensure_trailing_blank_lines(out_lines, wanted)
-    local count = 0
-    for i = #out_lines, 1, -1 do
-        if out_lines[i] == "" then
-            count = count + 1
+local function ensure_trailing_blank_lines(output_lines, desired_count)
+    -- Adjust trailing blank lines in output array to match desired count.
+    local current_count = 0
+    for i = #output_lines, 1, -1 do
+        if output_lines[i] == "" then
+            current_count = current_count + 1
         else
             break
         end
     end
 
-    if count > wanted then
-        for _ = 1, (count - wanted) do
-            out_lines[#out_lines] = nil
+    if current_count > desired_count then
+        for _ = 1, (current_count - desired_count) do
+            output_lines[#output_lines] = nil
         end
-    elseif count < wanted then
-        for _ = 1, (wanted - count) do
-            out_lines[#out_lines + 1] = ""
+    elseif current_count < desired_count then
+        for _ = 1, (desired_count - current_count) do
+            output_lines[#output_lines + 1] = ""
         end
     end
 end
 
 local function format_chapter_titles(text)
-    local out_lines = {}
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    local output_lines = {}
+    local lines = split_lines(text)
+    for _, line in ipairs(lines) do
         if is_chapter_title(line) then
             line = normalize_chapter_title_spacing(line)
-            -- Ensure exactly 2 blank lines before the title, except at the very start
-            -- of the file (no leading blank lines).
-            if #out_lines == 0 then
-                ensure_trailing_blank_lines(out_lines, 0)
+            -- Ensure exactly 2 blank lines before title (except at file start).
+            if #output_lines == 0 then
+                ensure_trailing_blank_lines(output_lines, 0)
             else
-                ensure_trailing_blank_lines(out_lines, 2)
+                ensure_trailing_blank_lines(output_lines, 2)
             end
-            out_lines[#out_lines + 1] = line
+            output_lines[#output_lines + 1] = line
             -- Ensure exactly 1 blank line after the title.
-            ensure_trailing_blank_lines(out_lines, 1)
+            ensure_trailing_blank_lines(output_lines, 1)
         else
             -- Preserve existing lines (including blank lines).
-            out_lines[#out_lines + 1] = line
+            output_lines[#output_lines + 1] = line
         end
     end
     -- Remove trailing blank lines at end of file.
-    while #out_lines > 0 and out_lines[#out_lines] == "" do
-        out_lines[#out_lines] = nil
+    while #output_lines > 0 and output_lines[#output_lines] == "" do
+        output_lines[#output_lines] = nil
     end
 
-    return table.concat(out_lines, "\n")
+    return table.concat(output_lines, "\n")
 end
 
 local function replace_corner_quotes(text)
@@ -513,48 +603,49 @@ local function replace_corner_quotes(text)
     return text
 end
 
+-- === Quote movement helpers ===
+
+local function get_last_codepoint(line_text)
+    -- Extract the last UTF-8 codepoint from line and its byte position.
+    local last_byte_pos = utf8.offset(line_text, -1)
+    if last_byte_pos == nil then
+        return nil, nil
+    end
+
+    return utf8.codepoint(line_text, last_byte_pos), last_byte_pos
+end
+
+local function is_only_indent(line)
+    -- Check if line contains only indentation (spaces, tabs, full-width space).
+    local next_pos = consume_indent_prefix(line, 1)
+
+    return next_pos > #line
+end
+
+local function split_leading_indent(line)
+    -- Split line into (indentation, content) parts.
+    local next_pos = consume_indent_prefix(line, 1)
+
+    return line:sub(1, next_pos - 1), line:sub(next_pos)
+end
+
 local function move_trailing_open_quote_to_next_line(text)
     -- Formatting rule:
     -- If a line ends with an opening quote (「 or 『), move that character to the
     -- beginning of the next non-empty line (after any leading indentation).
-    local function get_last_codepoint(line_text)
-        local last_start = utf8.offset(line_text, -1)
-        if last_start == nil then
-            return nil, nil
-        end
 
-        return utf8.codepoint(line_text, last_start), last_start
-    end
-
-    local function is_only_indent(line)
-        -- True if line contains only indentation chars: space, tab, or full-width space (U+3000).
-        local next_pos = consume_indent_prefix(line, 1)
-
-        return next_pos > #line
-    end
-
-    local function split_leading_indent(line)
-        -- Split leading indentation consisting of: space, tab, or full-width space (U+3000).
-        local next_pos = consume_indent_prefix(line, 1)
-
-        return line:sub(1, next_pos - 1), line:sub(next_pos)
-    end
-
-    local lines = {}
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-        lines[#lines + 1] = line
-    end
+    local lines = split_lines(text)
 
     local i = 1
     while i <= (#lines - 1) do
         local line = lines[i]
-        local last_cp, last_start = get_last_codepoint(line)
+        local last_cp, last_byte_pos = get_last_codepoint(line)
 
-        if last_cp ~= PUNCT_QUOTE_OPEN and last_cp ~= PUNCT_QUOTE_OPEN_NESTED then
+        if last_cp ~= 0x300C and last_cp ~= 0x300E then -- opening quotes: 「 or 『
             i = i + 1
         else
-            local quote = line:sub(last_start)
-            local new_line = line:sub(1, last_start - 1)
+            local quote_char = line:sub(last_byte_pos)
+            local line_without_quote = line:sub(1, last_byte_pos - 1)
 
             -- Find the next non-empty line to receive the quote.
             local j = i + 1
@@ -566,9 +657,9 @@ local function move_trailing_open_quote_to_next_line(text)
                 -- No following non-empty line; keep the quote where it is.
                 i = i + 1
             else
-                local lead, rest = split_leading_indent(lines[j])
-                lines[j] = lead .. quote .. rest
-                lines[i] = new_line
+                local indent_part, content_part = split_leading_indent(lines[j])
+                lines[j] = indent_part .. quote_char .. content_part
+                lines[i] = line_without_quote
 
                 -- If the current line becomes indentation-only, remove it.
                 if is_only_indent(lines[i]) then
@@ -583,80 +674,92 @@ local function move_trailing_open_quote_to_next_line(text)
     return table.concat(lines, "\n")
 end
 
--- === Quote normalization & validation ===
+-- === UTF-8 validation helpers ===
+
+local function format_ascii_preview(text, limit)
+    limit = limit or 160
+    local preview_len = math.min(#text, limit)
+    local preview_bytes = { text:byte(1, preview_len) }
+    local preview_chars = {}
+    for _, byte_val in ipairs(preview_bytes) do
+        if byte_val >= 0x20 and byte_val <= 0x7E then
+            preview_chars[#preview_chars + 1] = string.char(byte_val)
+        else
+            preview_chars[#preview_chars + 1] = "."
+        end
+    end
+    if #text > limit then
+        preview_chars[#preview_chars + 1] = "..."
+    end
+    return table.concat(preview_chars)
+end
+
+local function format_hex_around_byte(text, byte_pos)
+    local start = math.max(1, byte_pos - 16)
+    local finish = math.min(#text, byte_pos + 16)
+    local hex_bytes = { text:byte(start, finish) }
+    local hex_strs = {}
+    for _, b in ipairs(hex_bytes) do
+        hex_strs[#hex_strs + 1] = string.format("%02X", b)
+    end
+    return string.format("bytes %d..%d: %s", start, finish, table.concat(hex_strs, " "))
+end
+
+local function validate_utf8_in_chapter(chapter_lines)
+    -- Check for invalid UTF-8 in chapter lines. If found, report error and abort.
+    -- Returns nil if all valid.
+    for line_idx, line in ipairs(chapter_lines) do
+        local _, invalid_byte_pos = utf8.len(line)
+        if invalid_byte_pos == nil then
+            goto continue_line
+        end
+
+        -- UTF-8 error detected - format detailed error message
+        local chapter_title = chapter_lines[1] or "<unknown chapter>"
+        local line_kind = (line_idx == 1) and "title" or "body"
+
+        io.stderr:write("Invalid UTF-8 detected. \n")
+        io.stderr:write("Chapter title: " .. tostring(chapter_title) .. "\n")
+        io.stderr:write(string.format("Offending line: %s (chapter-local index %d)\n", line_kind, line_idx))
+        io.stderr:write(string.format("Invalid byte position in that line: %d\n", invalid_byte_pos))
+        io.stderr:write("Line preview (ASCII; non-ASCII shown as '.'): " .. format_ascii_preview(line) .. "\n")
+        io.stderr:write("Hex dump around invalid byte: " .. format_hex_around_byte(line, invalid_byte_pos) .. "\n")
+        die("Aborting due to invalid UTF-8.")
+
+        ::continue_line::
+    end
+end
 
 local function chapter_has_unpaired_quotes(chapter_lines)
     -- Validates both quote levels:
     --   outer: 「 」 (U+300C/U+300D)
     --   inner: 『 』 (U+300E/U+300F)
-    local function format_ascii_preview(line_text, limit)
-        limit = limit or 160
-        local n = math.min(#line_text, limit)
-        local bytes = { line_text:byte(1, n) }
-        local out = {}
-        for _, b in ipairs(bytes) do
-            if b >= 0x20 and b <= PUNCT_ASCII_TILDE then
-                out[#out + 1] = string.char(b)
-            else
-                out[#out + 1] = "."
-            end
-        end
-        if #line_text > limit then
-            out[#out + 1] = "..."
-        end
+    validate_utf8_in_chapter(chapter_lines)
 
-        return table.concat(out)
-    end
-
-    local function format_hex_dump_around(line_text, pos)
-        local start_pos = math.max(1, pos - 16)
-        local end_pos = math.min(#line_text, pos + 16)
-        local bytes = { line_text:byte(start_pos, end_pos) }
-        local parts = {}
-        for i, b in ipairs(bytes) do
-            parts[#parts + 1] = string.format("%02X", b)
-        end
-
-        return string.format("bytes %d..%d: %s", start_pos, end_pos, table.concat(parts, " "))
-    end
-
-    local stack = {}
-    for line_index, line in ipairs(chapter_lines) do
-        local _, invalid_pos = utf8.len(line)
-        if invalid_pos ~= nil then
-            local chapter_title = chapter_lines[1] or "<unknown chapter>"
-            local line_kind = (line_index == 1) and "title" or "body"
-            io.stderr:write("Invalid UTF-8 detected. \n")
-            io.stderr:write("Chapter title: " .. tostring(chapter_title) .. "\n")
-            io.stderr:write(string.format("Offending line: %s (chapter-local index %d)\n", line_kind, line_index))
-            io.stderr:write(string.format("Invalid byte position in that line: %d\n", invalid_pos))
-            io.stderr:write("Line preview (ASCII; non-ASCII shown as '.'): " .. format_ascii_preview(line) .. "\n")
-            io.stderr:write("Hex dump around invalid byte: " .. format_hex_dump_around(line, invalid_pos) .. "\n")
-            die("Aborting due to invalid UTF-8.")
-        end
-
-        for _, cp in utf8.codes(line) do
-            if cp == PUNCT_QUOTE_OPEN or cp == PUNCT_QUOTE_OPEN_NESTED then
-                stack[#stack + 1] = cp
-            elseif cp == PUNCT_QUOTE_CLOSE or cp == PUNCT_QUOTE_CLOSE_NESTED then
-                local open = stack[#stack]
-                stack[#stack] = nil
-                if open == nil then
+    local quote_stack = {}
+    for _, line in ipairs(chapter_lines) do
+        for _, codepoint in utf8.codes(line) do
+            if codepoint == 0x300C or codepoint == 0x300E then     -- opening quotes: 「 or 『
+                quote_stack[#quote_stack + 1] = codepoint
+            elseif codepoint == 0x300D or codepoint == 0x300F then -- closing quotes: 」 or 』
+                local opening_quote = quote_stack[#quote_stack]
+                quote_stack[#quote_stack] = nil
+                if opening_quote == nil then
                     return true
                 end
 
-                if cp == PUNCT_QUOTE_CLOSE and open ~= PUNCT_QUOTE_OPEN then
+                if codepoint == 0x300D and opening_quote ~= 0x300C then -- 」 but expected 「
                     return true
                 end
 
-                if cp == PUNCT_QUOTE_CLOSE_NESTED and open ~= PUNCT_QUOTE_OPEN_NESTED then
+                if codepoint == 0x300F and opening_quote ~= 0x300E then -- 』 but expected 『
                     return true
                 end
             end
         end
     end
 
-    return #stack ~= 0
+    return #quote_stack ~= 0
 end
 
 local function normalize_quote_levels_in_lines(lines)
@@ -664,80 +767,185 @@ local function normalize_quote_levels_in_lines(lines)
     -- - depth 0: use 「 」
     -- - depth >= 1: use 『 』
     -- This also fixes the case where 『』 is incorrectly used as the first-level quote.
-    local depth = 0
-    local out = {}
+    local quote_depth = 0
+    local output_lines = {}
     for _, line in ipairs(lines) do
-        local buf = {}
-        for _, cp in utf8.codes(line) do
-            if cp == PUNCT_QUOTE_OPEN or cp == PUNCT_QUOTE_OPEN_NESTED then
-                if depth == 0 then
-                    buf[#buf + 1] = utf8.char(PUNCT_QUOTE_OPEN)        -- 「
+        local line_buffer = {}
+        for _, codepoint in utf8.codes(line) do
+            if codepoint == 0x300C or codepoint == 0x300E then        -- opening quotes: 「 or 『
+                if quote_depth == 0 then
+                    line_buffer[#line_buffer + 1] = utf8.char(0x300C) -- 「
                 else
-                    buf[#buf + 1] = utf8.char(PUNCT_QUOTE_OPEN_NESTED) -- 『
+                    line_buffer[#line_buffer + 1] = utf8.char(0x300E) -- 『
                 end
-                depth = depth + 1
-            elseif cp == PUNCT_QUOTE_CLOSE or cp == PUNCT_QUOTE_CLOSE_NESTED then
+                quote_depth = quote_depth + 1
+            elseif codepoint == 0x300D or codepoint == 0x300F then -- closing quotes: 」 or 』
                 -- Only call this for chapters that are already validated.
-                if depth == 1 then
-                    buf[#buf + 1] = utf8.char(PUNCT_QUOTE_CLOSE)        -- 」
+                if quote_depth == 1 then
+                    line_buffer[#line_buffer + 1] = utf8.char(0x300D) -- 」
                 else
-                    buf[#buf + 1] = utf8.char(PUNCT_QUOTE_CLOSE_NESTED) -- 』
+                    line_buffer[#line_buffer + 1] = utf8.char(0x300F) -- 』
                 end
-                depth = depth - 1
+                quote_depth = quote_depth - 1
             else
-                buf[#buf + 1] = utf8.char(cp)
+                line_buffer[#line_buffer + 1] = utf8.char(codepoint)
             end
         end
-        out[#out + 1] = table.concat(buf)
+        output_lines[#output_lines + 1] = table.concat(line_buffer)
     end
 
-    return out
+    return output_lines
 end
 
+-- === Quote normalization & validation ===
+
+local function flush_chapter_to_output(output_lines, current_chapter_title, current_chapter_lines)
+    -- Helper: Flush accumulated chapter lines to output.
+    -- Normalizes quote levels in chapters without unpaired quotes.
+    if current_chapter_title == nil then
+        return
+    end
+
+    local has_quote_issue = chapter_has_unpaired_quotes(current_chapter_lines)
+    local final_lines = current_chapter_lines
+    if not has_quote_issue then
+        final_lines = normalize_quote_levels_in_lines(current_chapter_lines)
+    end
+
+    for _, line in ipairs(final_lines) do
+        output_lines[#output_lines + 1] = line
+    end
+end
+
+-- === Quote level normalization ===
 
 local function normalize_quote_levels_in_ok_chapters(text)
     -- Process chapter-by-chapter. If a chapter has no pairing issue, normalize quote levels:
     -- outer -> 「」, inner -> 『』.
-    local out_lines = {}
-    local current_title = nil
-    local chapter_lines = {}
+    local output_lines = {}
+    local current_chapter_title = nil
+    local current_chapter_lines = {}
 
-    local function flush_chapter()
-        if current_title == nil then
-            return
-        end
-
-        local has_issue = chapter_has_unpaired_quotes(chapter_lines)
-        local final_lines = chapter_lines
-        if not has_issue then
-            final_lines = normalize_quote_levels_in_lines(chapter_lines)
-        end
-
-        for _, l in ipairs(final_lines) do
-            out_lines[#out_lines + 1] = l
-        end
-
-        current_title = nil
-        chapter_lines = {}
-    end
-
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    local lines = split_lines(text)
+    for _, line in ipairs(lines) do
         if is_chapter_title(line) then
-            flush_chapter()
-            current_title = line
-            chapter_lines = { line }
+            flush_chapter_to_output(output_lines, current_chapter_title, current_chapter_lines)
+            current_chapter_title = line
+            current_chapter_lines = { line }
         else
-            if current_title ~= nil then
-                chapter_lines[#chapter_lines + 1] = line
+            -- Group lines by chapter, normalizing quote levels for chapters without errors
+            if current_chapter_title ~= nil then
+                current_chapter_lines[#current_chapter_lines + 1] = line
             else
-                out_lines[#out_lines + 1] = line
+                output_lines[#output_lines + 1] = line
             end
         end
     end
 
-    flush_chapter()
+    flush_chapter_to_output(output_lines, current_chapter_title, current_chapter_lines)
 
-    return table.concat(out_lines, "\n")
+    return table.concat(output_lines, "\n")
+end
+
+-- === Paragraph validation data & helpers ===
+
+local VALID_PARAGRAPH_ENDING_CODEPOINTS = {
+    [0x21] = true,   -- !
+    [0x2C] = true,   -- ,
+    [0x2E] = true,   -- .
+    [0x3F] = true,   -- ?
+    [0x3A] = true,   -- :
+    [0x7E] = true,   -- ~
+    [0x2014] = true, -- —
+    [0x2026] = true, -- …
+    [0x3002] = true, -- 。
+    [0x300B] = true, -- 》
+    [0xFF01] = true, -- ！
+    [0xFF0C] = true, -- ，
+    [0xFF1A] = true, -- ：
+    [0xFF1B] = true, -- ；
+    [0xFF1F] = true, -- ？
+    [0xFF5E] = true, -- ～
+}
+
+local CLOSING_QUOTE_CODEPOINTS = {
+    [0x300D] = true, -- 」
+    [0x300F] = true, -- 』
+    [0x3011] = true, -- 】
+    [0xFF09] = true, -- ）
+}
+
+-- Combine valid endings and closing quotes for invalid paragraph starts
+local INVALID_PARAGRAPH_START_CODEPOINTS = {}
+for cp, _ in pairs(VALID_PARAGRAPH_ENDING_CODEPOINTS) do
+    INVALID_PARAGRAPH_START_CODEPOINTS[cp] = true
+end
+for cp, _ in pairs(CLOSING_QUOTE_CODEPOINTS) do
+    INVALID_PARAGRAPH_START_CODEPOINTS[cp] = true
+end
+
+-- === Paragraph punctuation validation helpers ===
+
+local function check_paragraph_ending(codepoints, line_number, validation_issues)
+    -- Helper: Check if paragraph ends with valid punctuation (skipping trailing quotes).
+    if #codepoints == 0 then
+        return
+    end
+
+    local last_valid_idx = #codepoints
+    while last_valid_idx > 0 and CLOSING_QUOTE_CODEPOINTS[codepoints[last_valid_idx]] do
+        last_valid_idx = last_valid_idx - 1
+    end
+
+    if last_valid_idx > 0 then
+        local final_cp = codepoints[last_valid_idx]
+        if not VALID_PARAGRAPH_ENDING_CODEPOINTS[final_cp] then
+            validation_issues[#validation_issues + 1] = {
+                line_no = line_number,
+                kind = "invalid_ending",
+                note = "paragraph ends with invalid punctuation"
+            }
+        end
+    end
+end
+
+local function check_paragraph_start(codepoints, line_number, validation_issues)
+    -- Helper: Check if paragraph starts with invalid punctuation.
+    if #codepoints == 0 then
+        return
+    end
+
+    local first_cp = codepoints[1]
+    if INVALID_PARAGRAPH_START_CODEPOINTS[first_cp] then
+        validation_issues[#validation_issues + 1] = {
+            line_no = line_number,
+            kind = "invalid_start",
+            note = "paragraph starts with invalid punctuation"
+        }
+    end
+end
+
+local function is_dash_only_line(line)
+    -- Check if line contains EXACTLY 6 dash characters (the valid separator count).
+    -- First remove paragraph indentation, then check.
+    local trimmed = trim_ends(line)
+    -- Remove the paragraph indent prefix (　　)
+    local indent_end_pos = consume_indent_prefix(trimmed, 1)
+    local content_start_pos = indent_end_pos
+
+    -- Get all codepoints from the remaining content
+    local dash_count = 0
+    for byte_pos, cp in utf8.codes(trimmed) do
+        if byte_pos >= content_start_pos then
+            if cp == 0x2D then -- 0x2D is dash '-'
+                dash_count = dash_count + 1
+            else
+                return false -- Found non-dash character
+            end
+        end
+    end
+
+    return dash_count == 6
 end
 
 local function check_paragraph_punctuation(text)
@@ -748,108 +956,32 @@ local function check_paragraph_punctuation(text)
     -- 4. Don't start with ， 。 ？ ！ 」 』 … or , . ? !
     -- Returns: table of issues
 
-    -- Character sets (using global constants)
-    local valid_ending_punct = {
-        [PUNCT_ASCII_COMMA] = true,              -- ,
-        [PUNCT_ASCII_PERIOD] = true,             -- .
-        [PUNCT_ASCII_QUESTION] = true,           -- ?
-        [PUNCT_ASCII_EXCLAIM] = true,            -- !
-        [PUNCT_ASCII_COLON] = true,              -- :
-        [PUNCT_ASCII_TILDE] = true,              -- ~
-        [PUNCT_EM_DASH] = true,                  -- —
-        [PUNCT_COMMA_CN] = true,                 -- ，
-        [PUNCT_END_PERIOD] = true,               -- 。
-        [PUNCT_END_QUESTION] = true,             -- ？
-        [PUNCT_END_EXCLAIM] = true,              -- ！
-        [PUNCT_TILDE_CN] = true,                 -- ～
-        [PUNCT_COLON_CN] = true,                 -- ：
-        [PUNCT_SEMICOLON_CN] = true,             -- ；
-        [PUNCT_ELLIPSIS] = true,                 -- …
-        [PUNCT_DOUBLE_ANGLE_QUOTE_CLOSE] = true, -- 》
-    }
-
-    local closing_quotes = {
-        [PUNCT_QUOTE_CLOSE] = true,        -- 」
-        [PUNCT_QUOTE_CLOSE_NESTED] = true, -- 』
-        [PUNCT_BRACKET_CLOSE_CN] = true,   -- 】
-        [PUNCT_PAREN_CLOSE_CN] = true,     -- ）
-    }
-
-    -- invalid_start_punct = valid_ending_punct + closing_quotes
-    local invalid_start_punct = {}
-    for cp, _ in pairs(valid_ending_punct) do
-        invalid_start_punct[cp] = true
-    end
-
-    for cp, _ in pairs(closing_quotes) do
-        invalid_start_punct[cp] = true
-    end
-
-    local issues = {}
-
-    local function is_valid_ending(cp)
-        return valid_ending_punct[cp] ~= nil
-    end
-
-    local function is_closing_quote(cp)
-        return closing_quotes[cp] ~= nil
-    end
-
-    local function is_paragraph_start_invalid(cp)
-        return invalid_start_punct[cp] ~= nil
-    end
-
-    local line_no = 0
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-        line_no = line_no + 1
-
-        -- Skip empty lines and chapter titles
-        if line:match("%S") and not is_chapter_title(line) then
+    local validation_issues = {}
+    local lines = split_lines(text)
+    for line_number, line in ipairs(lines) do
+        -- Skip empty lines, chapter titles, separator lines, and dash-only lines
+        if line:match("%S") and not is_chapter_title(line) and not is_separator(line) and not is_dash_only_line(line) then
             local trimmed = trim_ends(line)
 
             if #trimmed > 0 then
                 -- Collect all codepoints for easier access
-                local cps = {}
-                for _, cp in utf8.codes(trimmed) do
-                    cps[#cps + 1] = cp
+                local codepoints = {}
+                for _, codepoint in utf8.codes(trimmed) do
+                    codepoints[#codepoints + 1] = codepoint
                 end
 
-                if #cps > 0 then
-                    -- Check paragraph ending: skip trailing closing quotes/parens, check what's underneath
-                    local last_idx = #cps
-                    while last_idx > 0 and is_closing_quote(cps[last_idx]) do
-                        last_idx = last_idx - 1
-                    end
-
-                    if last_idx > 0 then
-                        local actual_last_cp = cps[last_idx]
-                        if not is_valid_ending(actual_last_cp) then
-                            issues[#issues + 1] = {
-                                line_no = line_no,
-                                kind = "invalid_ending",
-                                note = "paragraph ends with invalid punctuation"
-                            }
-                        end
-                    end
-                end
-
-                -- Check paragraph starting
-                local first_cp = cps[1]
-                if first_cp ~= nil and is_paragraph_start_invalid(first_cp) then
-                    issues[#issues + 1] = {
-                        line_no = line_no,
-                        kind = "invalid_start",
-                        note = "paragraph starts with invalid punctuation"
-                    }
-                end
+                check_paragraph_ending(codepoints, line_number, validation_issues)
+                check_paragraph_start(codepoints, line_number, validation_issues)
             end
         end
     end
 
-    return issues
+    return validation_issues
 end
 
 local function log_path_for_output(output_path)
+    -- Generate log file path in same directory as output file.
+    -- Falls back to 'log' in current directory if no path separator found.
     local sep = package.config:sub(1, 1)
     local dir = output_path:match("^(.*)[\\/][^\\/]+$")
     if not dir then
@@ -865,135 +997,187 @@ local function first_quote_issue_in_chapter(chapter_line_items)
     --   nil if OK
     --   { kind = <string>, line_no = <int>, note = <string> }
     -- Track both the opening codepoint and the line number where it occurred.
-    local stack = {}
+    local quote_stack = {}
     for _, item in ipairs(chapter_line_items) do
-        local line_no = item.line_no
-        local text = item.text
-        for _, cp in utf8.codes(text) do
-            if cp == PUNCT_QUOTE_OPEN or cp == PUNCT_QUOTE_OPEN_NESTED then
-                stack[#stack + 1] = { cp = cp, line_no = line_no }
-            elseif cp == PUNCT_QUOTE_CLOSE or cp == PUNCT_QUOTE_CLOSE_NESTED then
-                local open = stack[#stack]
-                stack[#stack] = nil
-                if open == nil then
-                    return { kind = "extra_close", line_no = line_no, note = "closing quote without opener" }
+        local line_number = item.line_no
+        local line_text = item.text
+        for _, codepoint in utf8.codes(line_text) do
+            if codepoint == 0x300C or codepoint == 0x300E then     -- opening quotes: 「 or 『
+                quote_stack[#quote_stack + 1] = { codepoint = codepoint, line_no = line_number }
+            elseif codepoint == 0x300D or codepoint == 0x300F then -- closing quotes: 」 or 』
+                local opening_quote_info = quote_stack[#quote_stack]
+                quote_stack[#quote_stack] = nil
+                if opening_quote_info == nil then
+                    return { kind = "extra_close", line_no = line_number, note = "closing quote without opener" }
                 end
 
-                if cp == PUNCT_QUOTE_CLOSE and open.cp ~= PUNCT_QUOTE_OPEN then
-                    return { kind = "mismatch", line_no = line_no, note = "expected 』 but found 」" }
+                if codepoint == 0x300D and opening_quote_info.codepoint ~= 0x300C then -- 」 but expected 「
+                    return { kind = "mismatch", line_no = line_number, note = "expected 『 but found 」" }
                 end
 
-                if cp == PUNCT_QUOTE_CLOSE_NESTED and open.cp ~= PUNCT_QUOTE_OPEN_NESTED then
-                    return { kind = "mismatch", line_no = line_no, note = "expected 」 but found 』" }
+                if codepoint == 0x300F and opening_quote_info.codepoint ~= 0x300E then -- 』 but expected 『
+                    return { kind = "mismatch", line_no = line_number, note = "expected 「 but found 』" }
                 end
             end
         end
     end
 
-    if #stack ~= 0 then
+    if #quote_stack ~= 0 then
         -- Report the line number of the last unmatched opening quote (the one still on the stack).
-        local last_open = stack[#stack]
-        local open_line_no = last_open and last_open.line_no or 0
+        local last_unclosed = quote_stack[#quote_stack]
+        local opening_line_no = last_unclosed and last_unclosed.line_no or 0
 
-        return { kind = "unclosed", line_no = open_line_no, note = "unclosed opening quote(s) by end of chapter" }
+        return { kind = "unclosed", line_no = opening_line_no, note = "unclosed opening quote(s) by end of chapter" }
     end
 
     return nil
 end
 
+-- === Quote issue logging helpers ===
+
+local function collect_chapter_items(chapter_title, chapter_title_line_no)
+    -- Helper: Return initial chapter item list (with title).
+    return { { line_no = chapter_title_line_no, text = chapter_title } }
+end
+
+local function check_chapter_for_issues(chapter_items)
+    -- Helper: Check if chapter has quote issues, return issue or nil.
+    local quote_issue = first_quote_issue_in_chapter(chapter_items)
+    return quote_issue
+end
+
+local function format_quote_issue_item(title, title_line_no, issue)
+    -- Helper: Format a single quote issue for the log.
+    local chapter_line = string.format("- Chapter at line %d: %s", title_line_no, title)
+    local issue_line = string.format(
+        "  First issue at line %d (%s): %s",
+        issue.line_no,
+        issue.kind,
+        issue.note
+    )
+    return chapter_line, issue_line
+end
+
 local function write_unpaired_quote_log(text, output_path)
     -- Split output into chapters, validate quotes per chapter, and include output line numbers.
-    local current_title = nil
-    local current_title_line_no = 0
-    local current_items = {}
-    local issues = {}
+    -- Detects all quote issues per chapter and writes to log file.
 
-    local function flush_chapter()
-        if current_title ~= nil then
-            local issue = first_quote_issue_in_chapter(current_items)
-            if issue ~= nil then
-                issues[#issues + 1] = {
-                    title = current_title,
-                    title_line_no = current_title_line_no,
-                    issue = issue,
-                }
-            end
-        end
-        current_items = {}
-    end
+    -- Scan text line-by-line, grouping by chapter
+    local current_chapter_title = nil
+    local current_chapter_title_line_no = 0
+    local current_chapter_items = {}
+    local quote_issues = {}
 
-    local line_no = 0
-    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
-        line_no = line_no + 1
+    local lines = split_lines(text)
+    for line_number, line in ipairs(lines) do
         if is_chapter_title(line) then
-            flush_chapter()
-            current_title = line
-            current_title_line_no = line_no
-            current_items = { { line_no = line_no, text = line } }
+            -- End previous chapter and check for issues
+            if current_chapter_title ~= nil then
+                local quote_issue = check_chapter_for_issues(current_chapter_items)
+                if quote_issue ~= nil then
+                    quote_issues[#quote_issues + 1] = {
+                        title = current_chapter_title,
+                        title_line_no = current_chapter_title_line_no,
+                        issue = quote_issue,
+                    }
+                end
+            end
+            -- Start new chapter
+            current_chapter_title = line
+            current_chapter_title_line_no = line_number
+            current_chapter_items = collect_chapter_items(line, line_number)
         else
-            if current_title ~= nil then
-                current_items[#current_items + 1] = { line_no = line_no, text = line }
+            -- Add line to current chapter
+            if current_chapter_title ~= nil then
+                current_chapter_items[#current_chapter_items + 1] = { line_no = line_number, text = line }
             end
         end
     end
 
-    flush_chapter()
-
-    local log_path = log_path_for_output(output_path)
-    delete_file_if_exists(log_path)
-
-    local lines = {}
-    if #issues > 0 then
-        lines[#lines + 1] = "Unpaired/mismatched quotes detected (line numbers are in the output file):"
-        for _, item in ipairs(issues) do
-            lines[#lines + 1] = string.format("- Chapter at line %d: %s", item.title_line_no, item.title)
-            lines[#lines + 1] = string.format(
-                "  First issue at line %d (%s): %s",
-                item.issue.line_no,
-                item.issue.kind,
-                item.issue.note
-            )
+    -- Don't forget final chapter
+    if current_chapter_title ~= nil then
+        local quote_issue = check_chapter_for_issues(current_chapter_items)
+        if quote_issue ~= nil then
+            quote_issues[#quote_issues + 1] = {
+                title = current_chapter_title,
+                title_line_no = current_chapter_title_line_no,
+                issue = quote_issue,
+            }
         end
     end
 
-    write_all(log_path, table.concat(lines, "\n"))
+    -- Format and write log file
+    local log_file_path = log_path_for_output(output_path)
+    delete_file_if_exists(log_file_path)
 
-    -- If we wrote any log lines, notify the user on the terminal.
-    if #lines > 0 then
-        io.stderr:write("Quote issues detected; see log at: " .. tostring(log_path) .. "\n")
+    local log_lines = {}
+    if #quote_issues > 0 then
+        log_lines[#log_lines + 1] = "Unpaired/mismatched quotes detected (line numbers are in the output file):"
+        for _, issue_item in ipairs(quote_issues) do
+            local chapter_line, issue_line = format_quote_issue_item(
+                issue_item.title,
+                issue_item.title_line_no,
+                issue_item.issue
+            )
+            log_lines[#log_lines + 1] = chapter_line
+            log_lines[#log_lines + 1] = issue_line
+        end
+    end
+
+    write_all(log_file_path, table.concat(log_lines, "\n"))
+
+    -- Notify user if issues were found
+    if #log_lines > 0 then
+        io.stderr:write("Quote issues detected; see log at: " .. tostring(log_file_path) .. "\n")
+    end
+end
+
+-- === Paragraph validation logging helpers ===
+
+local function append_paragraph_issues_to_log(log_lines, paragraph_issues)
+    -- Helper: Append paragraph punctuation issues to log lines.
+    if #paragraph_issues == 0 then
+        return
+    end
+
+    log_lines[#log_lines + 1] = "Paragraph punctuation issues detected (line numbers are in the output file):"
+    for _, issue in ipairs(paragraph_issues) do
+        log_lines[#log_lines + 1] = string.format("- Line %d (%s): %s", issue.line_no, issue.kind, issue.note)
+    end
+end
+
+local function prepend_existing_log_if_present(log_lines, log_file_path)
+    -- Helper: Prepend existing log content if file exists.
+    if not file_exists(log_file_path) then
+        return
+    end
+
+    local existing_log = read_all(log_file_path)
+    if #existing_log > 0 then
+        log_lines[#log_lines + 1] = existing_log
+        log_lines[#log_lines + 1] = ""
     end
 end
 
 local function write_paragraph_check_log(text, output_path)
-    -- Check paragraphs for punctuation issues
-    local issues = check_paragraph_punctuation(text)
+    -- Check paragraphs for punctuation issues and write to log if found.
+    local paragraph_issues = check_paragraph_punctuation(text)
+    local log_file_path = log_path_for_output(output_path)
 
-    local log_path = log_path_for_output(output_path)
+    local log_lines = {}
+    prepend_existing_log_if_present(log_lines, log_file_path)
+    append_paragraph_issues_to_log(log_lines, paragraph_issues)
 
-    local lines = {}
-    if #issues > 0 then
-        -- Read existing log if it has quote issues
-        local existing = file_exists(log_path) and read_all(log_path) or ""
-        if #existing > 0 then
-            lines[#lines + 1] = existing
-            lines[#lines + 1] = ""
-        end
-
-        lines[#lines + 1] = "Paragraph punctuation issues detected (line numbers are in the output file):"
-        for _, issue in ipairs(issues) do
-            lines[#lines + 1] = string.format("- Line %d (%s): %s", issue.line_no, issue.kind, issue.note)
-        end
-    end
-
-    if #lines > 0 then
-        write_all(log_path, table.concat(lines, "\n"))
-        io.stderr:write("Paragraph issues detected; see log at: " .. tostring(log_path) .. "\n")
+    if #log_lines > 0 then
+        write_all(log_file_path, table.concat(log_lines, "\n"))
+        io.stderr:write("Paragraph issues detected; see log at: " .. tostring(log_file_path) .. "\n")
     end
 end
 
 -- === CLI ===
 
 local function parse_args(argv)
+    -- Parse command-line arguments. Returns table with 'help' or 'input' field.
     local args = {}
     if #argv == 0 then
         args.help = true
@@ -1019,6 +1203,7 @@ local function parse_args(argv)
 end
 
 local function backup_original_path(input_path)
+    -- Generate backup file path: 'original_<basename>.txt' in same directory as input.
     local sep = package.config:sub(1, 1)
     local dir, file = input_path:match("^(.*[\\/])(.*)$")
     if not dir then
